@@ -200,6 +200,19 @@ const profileCache = new Map();
 const unavailableProfileCache = new Map();
 const PROFILE_CACHE_TTL_MS = 60 * 1000;
 const UNAVAILABLE_PROFILE_CACHE_TTL_MS = 2 * 60 * 1000;
+const FALLBACK_TIKTOK_AVATAR = '/assets/pfpwhite.png';
+
+function fallbackTikTokProfile(username) {
+  return {
+    unique_id: username,
+    nickname: username,
+    avatar: FALLBACK_TIKTOK_AVATAR,
+    follower_count: null,
+    following_count: null,
+    is_fallback: true,
+    is_private_or_unavailable: true
+  };
+}
 
 function logLookupFailure(source, error) {
   if (process.env.DEBUG_TIKTOK_LOOKUP === '1') console.warn(`${source}:`, error.message);
@@ -411,7 +424,7 @@ app.get('/api/tiktok-user', requireAuth, async (req, res) => {
     }
     const unavailableAt = unavailableProfileCache.get(cleanHandle.toLowerCase());
     if (unavailableAt && Date.now() - unavailableAt < UNAVAILABLE_PROFILE_CACHE_TTL_MS) {
-      return res.status(404).json({ error: 'TikTok profile is temporarily unavailable. Try again in a moment.' });
+      return res.json({ code: 0, data: { user: fallbackTikTokProfile(cleanHandle) } });
     }
 
     try {
@@ -461,10 +474,11 @@ app.get('/api/tiktok-user', requireAuth, async (req, res) => {
     }
 
     unavailableProfileCache.set(cleanHandle.toLowerCase(), Date.now());
-    return res.status(404).json({ error: 'TikTok account not found or unavailable' });
+    return res.json({ code: 0, data: { user: fallbackTikTokProfile(cleanHandle) } });
   } catch (error) {
     logLookupFailure('Error fetching TikTok user', error);
-    return res.status(502).json({ error: 'TikTok profile lookup is temporarily unavailable' });
+    const cleanHandle = String(req.query.username || '').replace(/^@+/, '').trim();
+    return res.json({ code: 0, data: { user: fallbackTikTokProfile(cleanHandle) } });
   }
 });
 

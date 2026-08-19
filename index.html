@@ -1632,7 +1632,7 @@
     }
 
     function letterAvatarData(name) {
-      return "assets/apple-touch-icon.png";
+      return "assets/pfpwhite.png";
     }
 
     function formatTikTokCount(value) {
@@ -1655,8 +1655,8 @@
     }
 
     function setTikTokAvatar(image, suppliedAvatar, handle, name) {
-      const fallbackAvatar = "assets/apple-touch-icon.png";
-      const realAvatar = suppliedAvatar || `https://unavatar.io/tiktok/${encodeURIComponent(handle)}?fallback=false`;
+      const fallbackAvatar = "assets/pfpwhite.png";
+      const realAvatar = suppliedAvatar || fallbackAvatar;
       image.onerror = () => {
         image.onerror = null;
         image.src = fallbackAvatar;
