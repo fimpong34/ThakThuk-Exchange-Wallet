@@ -19,6 +19,7 @@ const MONGODB_URI = process.env.MONGODB_URI;
 const MONGODB_DB = process.env.MONGODB_DB || 'exchange_walletst_app';
 let mongoClient;
 let usersCollection;
+let sessionsCollection;
 let userStoreReadyPromise;
 
 function hashPassword(password) {
@@ -72,7 +73,9 @@ async function initialiseUserStore() {
   mongoClient = new MongoClient(MONGODB_URI);
   await mongoClient.connect();
   usersCollection = mongoClient.db(MONGODB_DB).collection('users');
+  sessionsCollection = mongoClient.db(MONGODB_DB).collection('sessions');
   await usersCollection.createIndex({ username: 1 }, { unique: true });
+  await sessionsCollection.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
   users = await usersCollection.find({}).toArray();
 
   if (users.length === 0) {
@@ -116,12 +119,15 @@ app.use('/api', async (req, res, next) => {
   }
 });
 
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-  const session = sessions.get(token);
+  const session = sessionsCollection ? await sessionsCollection.findOne({ token }) : sessions.get(token);
   const user = session && users.find((entry) => entry.id === session.userId);
   if (!user || (user.expiresAt && Date.now() >= user.expiresAt)) {
-    if (token) sessions.delete(token);
+  if (token) {
+    sessions.delete(token);
+    if (sessionsCollection) await sessionsCollection.deleteOne({ token });
+  }
     return res.status(401).json({ error:'Session expired or unauthorized' });
   }
   req.authUser = user;
@@ -133,22 +139,27 @@ function requireAdmin(req, res, next) {
   requireAuth(req, res, () => req.authUser.role === 'admin' ? next() : res.status(403).json({ error:'Admin access required' }));
 }
 
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
   const username = String(req.body.username || '').trim();
   const password = String(req.body.password || '');
   const user = users.find((entry) => entry.username.toLowerCase() === username.toLowerCase() && verifyPassword(password, entry.passwordHash));
   if (!user) return res.status(401).json({ error:'Incorrect username or password' });
   if (user.expiresAt && Date.now() >= user.expiresAt) return res.status(403).json({ error:'Your access time has expired. Contact the admin.' });
-  for (const [existingToken, session] of sessions) {
-    if (session.userId === user.id) sessions.delete(existingToken);
-  }
+  if (sessionsCollection) await sessionsCollection.deleteMany({ userId: user.id });
+  else for (const [existingToken, session] of sessions) if (session.userId === user.id) sessions.delete(existingToken);
   const token = crypto.randomBytes(32).toString('hex');
-  sessions.set(token, { userId:user.id, createdAt:Date.now() });
+  const session = { token, userId:user.id, createdAt:new Date(), expiresAt:new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) };
+  sessions.set(token, session);
+  if (sessionsCollection) await sessionsCollection.insertOne(session);
   res.json({ token, user:publicUser(user) });
 });
 
 app.get('/api/session', requireAuth, (req, res) => res.json({ user:publicUser(req.authUser) }));
-app.post('/api/logout', requireAuth, (req, res) => { sessions.delete(req.authToken); res.json({ ok:true }); });
+app.post('/api/logout', requireAuth, async (req, res) => {
+  sessions.delete(req.authToken);
+  if (sessionsCollection) await sessionsCollection.deleteOne({ token: req.authToken });
+  res.json({ ok:true });
+});
 
 app.get('/api/admin/users', requireAdmin, (req, res) => {
   res.json(users.filter((user) => user.role !== 'admin').map(adminUser));
