@@ -4,6 +4,7 @@ const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { MongoClient } = require('mongodb');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,6 +15,11 @@ app.use(express.json());
 const USERS_FILE = path.join(__dirname, 'users.json');
 const sessions = new Map();
 const IS_SERVERLESS = Boolean(process.env.VERCEL);
+const MONGODB_URI = process.env.MONGODB_URI;
+const MONGODB_DB = process.env.MONGODB_DB || 'exchange_walletst_app';
+let mongoClient;
+let usersCollection;
+let userStoreReadyPromise;
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -55,12 +61,60 @@ function loadUsers() {
   return storedUsers;
 }
 
-let users = loadUsers();
-const saveUsers = () => {
-  if (!IS_SERVERLESS) fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+let users = MONGODB_URI ? [] : loadUsers();
+
+async function initialiseUserStore() {
+  if (!MONGODB_URI) {
+    if (IS_SERVERLESS) throw new Error('MONGODB_URI is required in the Vercel environment.');
+    return;
+  }
+
+  mongoClient = new MongoClient(MONGODB_URI);
+  await mongoClient.connect();
+  usersCollection = mongoClient.db(MONGODB_DB).collection('users');
+  await usersCollection.createIndex({ username: 1 }, { unique: true });
+  users = await usersCollection.find({}).toArray();
+
+  if (users.length === 0) {
+    const username = String(process.env.ADMIN_USERNAME || '').trim();
+    const password = String(process.env.ADMIN_PASSWORD || '');
+    if (!username || password.length < 8) {
+      throw new Error('Set ADMIN_USERNAME and an ADMIN_PASSWORD of at least 8 characters before the first deployment.');
+    }
+    const admin = {
+      id: crypto.randomUUID(), username, passwordHash: hashPassword(password),
+      role: 'admin', expiresAt: null, createdAt: new Date().toISOString()
+    };
+    await usersCollection.insertOne(admin);
+    users = [admin];
+  }
+}
+
+function ensureUserStore() {
+  userStoreReadyPromise ??= initialiseUserStore();
+  return userStoreReadyPromise;
+}
+
+const saveUsers = async () => {
+  if (usersCollection) {
+    await usersCollection.deleteMany({});
+    if (users.length) await usersCollection.insertMany(users);
+  } else if (!IS_SERVERLESS) {
+    fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+  }
 };
 const publicUser = (user) => ({ id:user.id, username:user.username, role:user.role, expiresAt:user.expiresAt });
 const adminUser = (user) => ({ ...publicUser(user), createdAt:user.createdAt, password:'••••••••' });
+
+app.use('/api', async (req, res, next) => {
+  try {
+    await ensureUserStore();
+    next();
+  } catch (error) {
+    console.error('User store initialisation failed:', error.message);
+    res.status(503).json({ error: 'The account service is not configured yet.' });
+  }
+});
 
 function requireAuth(req, res, next) {
   const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
@@ -100,31 +154,31 @@ app.get('/api/admin/users', requireAdmin, (req, res) => {
   res.json(users.filter((user) => user.role !== 'admin').map(adminUser));
 });
 
-app.post('/api/admin/users', requireAdmin, (req, res) => {
+app.post('/api/admin/users', requireAdmin, async (req, res) => {
   const username = String(req.body.username || '').trim();
   const password = String(req.body.password || '').trim();
   const durationMs = Number(req.body.durationMs);
   if (!/^[A-Za-z0-9._-]{3,32}$/.test(username) || password.length < 4 || durationMs < 60000) return res.status(400).json({ error:'Enter a valid username, password, and access time' });
   if (users.some((user) => user.username.toLowerCase() === username.toLowerCase())) return res.status(409).json({ error:'Username already exists' });
   const user = { id:crypto.randomUUID(), username, passwordHash:hashPassword(password), role:'user', expiresAt:Date.now()+durationMs, createdAt:new Date().toISOString() };
-  users.push(user); saveUsers(); res.status(201).json(adminUser(user));
+  users.push(user); await saveUsers(); res.status(201).json(adminUser(user));
 });
 
-app.put('/api/admin/users/:id', requireAdmin, (req, res) => {
+app.put('/api/admin/users/:id', requireAdmin, async (req, res) => {
   const user = users.find((entry) => entry.id === req.params.id && entry.role !== 'admin');
   if (!user) return res.status(404).json({ error:'User not found' });
   if (req.body.username !== undefined) user.username = String(req.body.username).trim();
   if (req.body.password !== undefined && String(req.body.password).trim()) user.passwordHash = hashPassword(String(req.body.password).trim());
   if (req.body.adjustMs !== undefined) user.expiresAt = Math.max(Date.now(), Number(user.expiresAt || Date.now()) + Number(req.body.adjustMs));
   if (req.body.expiresAt !== undefined) user.expiresAt = Number(req.body.expiresAt);
-  saveUsers(); res.json(adminUser(user));
+  await saveUsers(); res.json(adminUser(user));
 });
 
-app.delete('/api/admin/users/:id', requireAdmin, (req, res) => {
+app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
   const before = users.length;
   users = users.filter((entry) => !(entry.id === req.params.id && entry.role !== 'admin'));
   if (users.length === before) return res.status(404).json({ error:'User not found' });
-  saveUsers(); res.json({ ok:true });
+  await saveUsers(); res.json({ ok:true });
 });
 
 const browserHeaders = {
