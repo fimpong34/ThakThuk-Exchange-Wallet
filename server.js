@@ -13,6 +13,7 @@ app.use(express.json());
 
 const USERS_FILE = path.join(__dirname, 'users.json');
 const sessions = new Map();
+const IS_SERVERLESS = Boolean(process.env.VERCEL);
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -38,7 +39,7 @@ function loadUsers() {
       expiresAt: null,
       createdAt: new Date().toISOString()
     }];
-    fs.writeFileSync(USERS_FILE, JSON.stringify(initial, null, 2));
+    if (!IS_SERVERLESS) fs.writeFileSync(USERS_FILE, JSON.stringify(initial, null, 2));
     return initial;
   }
   const storedUsers = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
@@ -55,7 +56,9 @@ function loadUsers() {
 }
 
 let users = loadUsers();
-const saveUsers = () => fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+const saveUsers = () => {
+  if (!IS_SERVERLESS) fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+};
 const publicUser = (user) => ({ id:user.id, username:user.username, role:user.role, expiresAt:user.expiresAt });
 const adminUser = (user) => ({ ...publicUser(user), createdAt:user.createdAt, password:'••••••••' });
 
